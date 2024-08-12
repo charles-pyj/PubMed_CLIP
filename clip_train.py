@@ -17,6 +17,8 @@ import requests
 from tqdm import tqdm 
 import random
 import torch.nn.functional as F
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 device='cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
@@ -37,7 +39,7 @@ def get_visual_embed(model,path):
 
 
 def get_text_embed(model,string):
-    tokens = clip.tokenize([string[:77]],context_length=77).to(device)
+    tokens = clip.tokenize(string,context_length=77).to(device)
     return model.encode_text(tokens).to(device)
 
 def get_similarity(model,url,caption):
@@ -64,7 +66,7 @@ def custom_collate_fn(batch):
     # Filter out invalid entries
     batch = list(filter(lambda x: x is not None and x[0] is not None and x[1] is not None, batch))
     if len(batch) == 0:
-        return None
+        return None,None
     return default_collate(batch)
 
 class CustomImageDataset(Dataset):
@@ -88,7 +90,7 @@ class CustomImageDataset(Dataset):
         if get_image_url(self.img_dir[idx],idx):
             try:
                visual = self.transform(Image.open(f"./tmp/{idx}.jpg")).to(device)
-               text_embed = clip.tokenize(self.img_labels[idx][:77],context_length=77).squeeze().to(device)
+               text_embed = clip.tokenize(self.img_labels[idx],context_length=77).squeeze().to(device)
                os.remove(f"./tmp/{idx}.jpg")
                return visual, text_embed
             except : 
@@ -134,7 +136,7 @@ def load_model(checkpoint_path):
             params.append(p)  # Only append the parameter itself
     return model, preprocess, params
 
-def load_model_ckeckpoint(checkpoint_path,base_model):
+def load_model_checkpoint(checkpoint_path,base_model):
     model, preprocess = clip.load(base_model, device=device)
     model = torch.load(checkpoint_path)
     # checkpoint = torch.load(checkpoint_path)
@@ -203,7 +205,7 @@ def train(model,train_loader,val_loader,optimizer,batch_size):
             train_all_loss += train_total_loss
         #evaluate(model,val_loader)
         print(f"Average loss over epoch: {train_all_loss}")
-    torch.save(model, "./checkpoint_ViT_new_0803.pth")
+    torch.save(model, "./checkpoint_ViT_short.pth")
     print(f"Model saved!")
 
 def evaluate(model, val_loader):
@@ -250,6 +252,7 @@ def evaluate(model, val_loader):
     print(f"Recall @ 5: {np.mean(recall5)}")
 
 def get_image_url(url,idx):
+    print(url)
     try: 
         responseImg = requests.get(url)
         if responseImg.status_code == 200:
@@ -273,25 +276,56 @@ def get_pmc_image(records_path,img_path):
     captions = [i['caption'] for i in records]
     return img_paths, captions
 
+def try_tokenize(texts):
+    token_sizes = []
+    length_cnt = 0
+    for i in tqdm(range(len(texts))):
+        try:
+            text_embed = clip.tokenize(texts[i],context_length=1024).squeeze().to(device)
+            #print(text_embed.shape)
+            non_padding_tokens = (text_embed != 0).sum().item()
+            token_sizes.append(non_padding_tokens)
+            #print(f"Num of tokens: {non_padding_tokens}")
+        except: 
+            #print("limit exceeded")
+            length_cnt += 1
+            token_sizes.append(10000)
+    print(f"Ratio: {length_cnt/len(texts)}")
+    with open("./token_length.json","w") as f:
+        json.dump(token_sizes,f)
+    # sns.kdeplot(token_sizes, fill=True, color="skyblue", bw_adjust=0.5)
+    # plt.xlabel('Token Cnt')
+    # plt.ylabel('Density')
+    # plt.axvline(77, color='red', linestyle='--', linewidth=2)
+    # plt.title('Multi Panel Distribution Density Plot')
+    # # Save the plot
+    # plt.savefig('./multiple_distribution_density_plot.png', dpi=300, bbox_inches='tight')
+    # Display the plot
+    
+
 if __name__ == "__main__":
     #records = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/test/test_caption.json")
     # model = torch.load("./checkpoint_new.pth")
     # torch.save(model.state_dict(),"./CLIP_state_new.pth")
-    model, preprocess, trainable_params = load_model_ckeckpoint("/home/panyijun/PubMed_CLIP/checkpoint_ViT_new_0802.pth","ViT-L/14")
+    model, preprocess, trainable_params = load_model_checkpoint("./checkpoint_ViT_short.pth","ViT-L/14")
     print(len(trainable_params))
     # records_path = "/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/test/test_caption.json"
     # img_path = "../clip_img"
     # img_paths, captions = get_pmc_image(records_path,img_path)
-    img_paths = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_paths.json")[600000:700000]
-    captions = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions.json")[600000:700000]
+    img_paths = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_paths_short.json")[-1000:]
+    captions = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions_short.json")[-1000:]
+    print(len(img_paths))
+    print(len(captions))
     # json_test = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/PMC_figure/test_set/test.json")
     # img_paths = [i[1] for i in json_test]
     # captions = [i[2] for i in json_test]
-    img_paths, captions = shuffle_list(img_paths,captions)
+
+    
+    #img_paths, captions = shuffle_list(img_paths,captions)
     train_set = CustomImageDataset(
     img_dir=img_paths,texts=captions,transform=preprocess)
     #print(img_paths[900:])
-    val_set = CustomImageDataset(img_dir=img_paths,texts=captions,transform=preprocess)
+    val_set = CustomImageDataset(img_dir=img_paths[:200],texts=captions[:200],transform=preprocess)
     train_loader = torch.utils.data.DataLoader(
         train_set,
         batch_size=32,
@@ -299,11 +333,15 @@ if __name__ == "__main__":
     )
     test_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_size=64,
+        batch_size=32,
         collate_fn = custom_collate_fn
     )
-    train(model,train_loader,test_loader,get_optimizer(trainable_params,1e-6),batch_size=32)
-    #evaluate(model,test_loader)
+    #print(len(captions))
+    #try_tokenize(captions)
+    # single panel: 0.314
+    # multi panel: 
+    #train(model,train_loader,test_loader,get_optimizer(trainable_params,1e-5),batch_size=32)
+    evaluate(model,test_loader)
     # similarity = []
     # print(img_paths[0])
     # for i in range(1000):
