@@ -87,9 +87,18 @@ class CustomImageDataset(Dataset):
     
 
     def __getitem__(self, idx):
-        visual = self.transform(Image.open(self.img_dir[idx])).to(device)
-        text_embed = clip.tokenize(self.img_labels[idx],context_length=77).squeeze().to(device)
-        return visual, text_embed
+        if get_image_url(self.img_dir[idx],idx):
+            try:
+               visual = self.transform(Image.open(f"./tmp/{idx}.jpg")).to(device)
+               text_embed = clip.tokenize(self.img_labels[idx],context_length=77).squeeze().to(device)
+               os.remove(f"./tmp/{idx}.jpg")
+               return visual, text_embed
+            except : 
+                print(f"Skipping image at index {self.img_dir[idx]} due to UnidentifiedImageError")
+                os.remove(f"./tmp/{idx}.jpg")
+                return None, None
+        else :
+            return None, None
         # image = preprocess(read_image(self.img_dir[idx], mode=ImageReadMode.RGB))
         # try:
         #     visual = self.transform(Image.open(f"./tmp/{idx}.jpg")).to(device)
@@ -128,6 +137,7 @@ def load_model(checkpoint_path):
     return model, preprocess, params
 
 def load_model_checkpoint(checkpoint_path,base_model):
+    print(f"Model loaded from {checkpoint_path}")
     model, preprocess = clip.load(base_model, device=device)
     model = torch.load(checkpoint_path)
     # checkpoint = torch.load(checkpoint_path)
@@ -142,6 +152,7 @@ def load_model_checkpoint(checkpoint_path,base_model):
     return model, preprocess, params
 
 def load_model_raw():
+    print(f"Model loaded from raw")
     model, preprocess = clip.load("ViT-L/14", device=device)
     #checkpoint = torch.load(checkpoint_path)
     #model.load_state_dict(checkpoint)
@@ -183,8 +194,8 @@ def train(model,train_loader,val_loader,optimizer,batch_size):
             #print(images.dtype)
             size = images.shape[0]
             logits_per_image, logits_per_text = model(images, labels)
-            # logits_per_image *= (np.exp(0.01) / np.exp(0.07))
-            # logits_per_text *= (np.exp(0.01) / np.exp(0.07))
+            logits_per_image *= (np.exp(0.01) / np.exp(0.07))
+            logits_per_text *= (np.exp(0.01) / np.exp(0.07))
 
             ground_truth = torch.arange(size, dtype=torch.long, device=device)
             lambdaa = 0.5
@@ -196,7 +207,7 @@ def train(model,train_loader,val_loader,optimizer,batch_size):
             train_all_loss += train_total_loss
         #evaluate(model,val_loader)
         print(f"Average loss over epoch: {train_all_loss}")
-    torch.save(model, "./checkpoint_ViT_short_local.pth")
+    torch.save(model, "./checkpoint_ViT_short.pth")
     print(f"Model saved!")
 
 def evaluate(model, val_loader):
@@ -215,8 +226,8 @@ def evaluate(model, val_loader):
             logits_per_image, logits_per_text = model(images, labels)
             
             # Scaling logits
-            # logits_per_image *= (np.exp(0.01) / np.exp(0.07))
-            # logits_per_text *= (np.exp(0.01) / np.exp(0.07))
+            logits_per_image *= (np.exp(0.01) / np.exp(0.07))
+            logits_per_text *= (np.exp(0.01) / np.exp(0.07))
             
             # Compute probabilities
             probabilities = F.softmax(logits_per_image, dim=1)
@@ -298,45 +309,46 @@ if __name__ == "__main__":
     #records = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/test/test_caption.json")
     # model = torch.load("./checkpoint_new.pth")
     # torch.save(model.state_dict(),"./CLIP_state_new.pth")
-    model, preprocess, trainable_params = load_model_checkpoint("./checkpoint_ViT_short_local.pth","ViT-L/14")
+    model_raw, _, _ = load_model_raw()
+    model_old, _, _ = load_model_checkpoint("/home/panyijun/PubMed_CLIP/checkpoint_ViT_new_0803.pth","ViT-L/14")
+    model, preprocess, trainable_params = load_model_checkpoint("./checkpoint_ViT_short.pth","ViT-L/14")
     print(len(trainable_params))
     # records_path = "/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/test/test_caption.json"
     # img_path = "../clip_img"
     # img_paths, captions = get_pmc_image(records_path,img_path)
-    batch = 200000
-    batch_idx = 6
-    chunks_path = f"/scratch/drjieliu_root/drjieliu/panyijun/chunks/chunk_{batch_idx}"
-    img_paths = sorted(os.listdir(chunks_path),key=lambda x: int(x.split(".")[0]))
-    
-    img_paths_all = [os.path.join(chunks_path,i) for i in img_paths]
-    captions_list = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions_short.json")
-    captions = [captions_list[int(i.split('.')[0])] for i in img_paths]
-    print(len(captions))
-    print(len(img_paths_all))
+    img_paths = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_paths_short.json")[-5000:]
+    captions = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions_short.json")[-5000:]
     # json_test = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/PMC_figure/test_set/test.json")
     # img_paths = [i[1] for i in json_test]
     # captions = [i[2] for i in json_test]
+
+    
     img_paths, captions = shuffle_list(img_paths,captions)
     train_set = CustomImageDataset(
-    img_dir=img_paths_all,texts=captions,transform=preprocess)
+    img_dir=img_paths,texts=captions,transform=preprocess)
     #print(img_paths[900:])
-    val_set = CustomImageDataset(img_dir=img_paths[:200],texts=captions[:200],transform=preprocess)
+    val_set = CustomImageDataset(img_dir=img_paths[:1000],texts=captions[:1000],transform=preprocess)
     train_loader = torch.utils.data.DataLoader(
         train_set,
-        batch_size=128,
+        batch_size=32,
         collate_fn = custom_collate_fn
     )
     test_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_size=32,
+        batch_size=128,
         collate_fn = custom_collate_fn
     )
     #print(len(captions))
     #try_tokenize(captions)
     # single panel: 0.314
     # multi panel: 
-    train(model,train_loader,test_loader,get_optimizer(trainable_params,1e-5),batch_size=128)
-    #evaluate(model,test_loader)
+    #train(model,train_loader,test_loader,get_optimizer(trainable_params,1e-5),batch_size=32)
+    print(f"Base model:")
+    evaluate(model_raw,test_loader)
+    print(f"Old model: ")
+    evaluate(model_old,test_loader)
+    print(f"New model: ")
+    evaluate(model,test_loader)
     # similarity = []
     # print(img_paths[0])
     # for i in range(1000):

@@ -17,7 +17,7 @@ import requests
 from tqdm import tqdm 
 import random
 import torch.nn.functional as F
-
+import random
 device='cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
@@ -88,11 +88,11 @@ class CustomImageDataset(Dataset):
         if get_image_url(self.img_dir[idx],idx):
             try:
                visual = self.transform(Image.open(f"./tmp_embedding/{idx}.jpg")).to(device)
-               text_embed = clip.tokenize(self.img_labels[idx][:77],context_length=77).squeeze().to(device)
+               text_embed = clip.tokenize(self.img_labels[idx],context_length=77,truncate=True).squeeze().to(device)
                os.remove(f"./tmp_embedding/{idx}.jpg")
                return visual, text_embed
             except : 
-                print(f"Skipping image at index {idx} due to UnidentifiedImageError")
+                print(f"Skipping image at index {self.img_dir[idx]} due to UnidentifiedImageError")
                 os.remove(f"./tmp_embedding/{idx}.jpg")
                 return None, None
         else :
@@ -134,7 +134,7 @@ def load_model(checkpoint_path):
             params.append(p)  # Only append the parameter itself
     return model, preprocess, params
 
-def load_model_ckeckpoint(checkpoint_path,base_model):
+def load_model_checkpoint(checkpoint_path,base_model):
     model, preprocess = clip.load(base_model, device=device)
     model = torch.load(checkpoint_path)
     # checkpoint = torch.load(checkpoint_path)
@@ -282,14 +282,14 @@ def get_embedding(model,loader,output_dir):
         print(f"Batch {i}")
         images = torch.stack([img for img in image], dim=0).to(device)
         with torch.no_grad():
-            image_features = model.visual(images)
+            image_features = model.encode_image(images)
         #print(images.dtype)
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         embeddings.append(image_features)
         print(image_features.shape)
         #print(torch.norm(image_features[0]))
     embeddings_all_visual = torch.concat(embeddings,dim=0)
-    torch.save(embeddings_all_visual,"./visual.pth")
+    torch.save(embeddings_all_visual,"./visual_20000_128.pth")
 
 def get_embedding_text(model,captions,output_dir):
     # truncated = [i[:77] for i in captions]
@@ -297,13 +297,12 @@ def get_embedding_text(model,captions,output_dir):
     # print(model.encode_text(text_tokens).shape)
     model.eval()
     embeddings = []
-    truncated = [i[:77] for i in captions]
-    text_tokens = clip.tokenize(truncated,context_length=77).to('cuda')
+    #text_tokens = clip.tokenize(captions,context_length=77,truncate=True).to('cuda')
     with torch.no_grad():
-        for i in tqdm(range(0,len(truncated),32)):
+        for i in tqdm(range(0,len(captions),32)):
             print(f"Batch {i}")
-            sub_list = truncated[i:i+32]
-            tokens = clip.tokenize(sub_list,context_length=77).to('cuda')
+            sub_list = captions[i:i+32]
+            tokens = clip.tokenize(sub_list,context_length=77,truncate=True).to('cuda')
             embeddings_text = model.encode_text(tokens)
             embeddings.append(embeddings_text)
     # for i, (image, labels) in enumerate(tqdm(loader, desc=f"Generating embedding", unit="batch")):
@@ -318,19 +317,36 @@ def get_embedding_text(model,captions,output_dir):
         #print(torch.norm(image_features[0]))
     embeddings_all_text = torch.concat(embeddings,dim=0)
     print(embeddings_all_text.shape)
-    torch.save(embeddings_all_text,"./text.pth")
+    torch.save(embeddings_all_text,"./text_20000_128.pth")
 
+def try_tokenize(texts):
+    token_sizes = []
+    length_cnt = 0
+    for i in tqdm(range(len(texts))):
+        try:
+            text_embed = clip.tokenize(texts[i],context_length=1024).squeeze().to(device)
+            #print(text_embed.shape)
+            non_padding_tokens = (text_embed != 0).sum().item()
+            token_sizes.append(non_padding_tokens)
+            #print(f"Num of tokens: {non_padding_tokens}")
+        except: 
+            #print("limit exceeded")
+            length_cnt += 1
+            token_sizes.append(10000)
+    print(f"Ratio: {length_cnt/len(texts)}")
+    with open("./token_length_test.json","w") as f:
+        json.dump(token_sizes,f)
 
 if __name__ == "__main__":
-    model, preprocess, trainable_params = load_model_ckeckpoint("/home/panyijun/PubMed_CLIP/checkpoint_ViT_new_0802.pth","ViT-L/14")
+    model, preprocess, trainable_params = load_model_checkpoint("./checkpoint_ViT_short_local.pth","ViT-L/14")
     model.eval()
     json_test = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/PMC_figure/test_set/test.json")
     img_paths = [i[1] for i in json_test]
     captions = [i[2] for i in json_test]
     print(img_paths[:5])
     print(captions[:5])
-    # img_paths = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_paths.json")[500000:600000]
-    # captions = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions.json")[500000:600000]
+    img_paths = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_paths_short.json")[:20000]
+    captions = read_json("/nfs/turbo/umms-drjieliu/proj/medlineKG/data/figure_json_by_article/pmcimage_captions_short.json")[:20000]
     output_dir = "./"
     #img_paths, captions = shuffle_list(img_paths,captions)
     data_set = CustomImageDataset(img_dir=img_paths,texts=captions,transform=preprocess)
@@ -339,18 +355,49 @@ if __name__ == "__main__":
         batch_size=128,
         collate_fn = custom_collate_fn
     )
-    #get_embedding(model,data_loader,output_dir)
-    #get_embedding_text(model,captions,output_dir)
-    visual_embed = torch.load("/home/panyijun/PubMed_CLIP/visual_embed.pth")
-    text_embed = torch.load("/home/panyijun/PubMed_CLIP/text_embed.pth")
-    similarity = F.cosine_similarity(visual_embed,text_embed[5].unsqueeze(0),dim=1)
-    print(similarity.shape)
-    top_values, indices_JBB = torch.topk(similarity.float(), 1000)
-    print(indices_JBB)
-    print(img_paths[5])
-    print(indices_JBB[:5])
-    print(img_paths[indices_JBB[1]])
-    print(captions[indices_JBB[1]])
+    with open("./token_length_test.json","r") as f:
+        token_lengths = json.load(f)
+    get_embedding(model,data_loader,output_dir)
+    get_embedding_text(model,captions,output_dir)
+    # try_tokenize(captions)
+    # visual_embed = torch.load("/home/panyijun/PubMed_CLIP/visual_20000_128.pth")
+    # text_embed = torch.load("/home/panyijun/PubMed_CLIP/text_20000_128.pth")
+    # recall_at_one = 0
+    # recall_at_five = 0
+    # recall_at_ten = 0
+    # sample_size = 10000
+    # random_indices = random.sample(range(20000),sample_size)
+    # for i in tqdm(random_indices):
+    #     similarity = F.cosine_similarity(visual_embed,text_embed[i].unsqueeze(0),dim=1)
+    #     #print(f"Text query: {captions[ind]}")
+    #     #print(f"Text token length: {token_lengths[ind]}")
+    #     #print(f"Ground truth: {img_paths[ind]}")
+    #     #print(similarity.shape)
+    #     top_values, indices = torch.topk(similarity.float(), 20)
+    #     recall_at_one += int(i == indices[0])
+    #     recall_at_five += int(i in indices[:5])
+    #     recall_at_ten += int(i in indices[:10])
+    # print(f"Recall @ 1: {recall_at_one/sample_size}")
+    # print(f"Recall @ 5: {recall_at_five/sample_size}")
+    # print(f"Recall @ 10: {recall_at_ten/sample_size}")
+    # def single_test(ind):
+    #     similarity = F.cosine_similarity(visual_embed,text_embed[ind].unsqueeze(0),dim=1)
+    #     #print(f"Text query: {captions[ind]}")
+    #     #print(f"Text token length: {token_lengths[ind]}")
+    #     #print(f"Ground truth: {img_paths[ind]}")
+    #     #print(similarity.shape)
+    #     top_values, indices = torch.topk(similarity.float(), 10)
+    #     for i in range(10):
+    #         print(f"Image path: {img_paths[indices[i]]}")
+    #         print(f"Similarity: {top_values[i]}")
+    #         print(f"Corresponding text length: {token_lengths[indices[i]]}")
+    #     # print(indices_JBB)
+    #     # print(img_paths[5])
+    #     # print(indices_JBB[:5])
+    #     # print(img_paths[indices_JBB[1]])
+    #     # print(captions[indices_JBB[1]])
+    # # less_ind = [i for i in range(len(token_lengths)) if token_lengths[i] <= 77]
+    # single_test(25)
     # visual_embed = visual_embed.cpu().numpy()
     # text_embed = text_embed.cpu().numpy()
     # print(visual_embed.shape)
