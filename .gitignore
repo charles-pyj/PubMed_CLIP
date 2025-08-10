@@ -1,0 +1,12 @@
+# Ignore everything
+*
+
+# But not these file types
+!*.py
+!*.ipynb
+
+# Keep the .gitignore file itself
+!.gitignore
+
+# Allow directories so Git can traverse them
+!*/
